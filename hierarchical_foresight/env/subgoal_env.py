@@ -25,6 +25,7 @@ from . import environment
 from absl import flags
 from ..models import tdm
 from ..models import vae
+from ..models import q_func
 
 import numpy as np
 from tensor2tensor.bin.t2t_decoder import create_hparams
@@ -40,7 +41,7 @@ class SubGoalEnv(object):
 
   def __init__(self, difficulty, modeltype, cost, numsg=1, savedir='/tmp/',
                envtype='maze', phorizon=5, parallel=0,
-               tdmdir='/tmp/mazetdm/', vaedir='/tmp/mazevae',
+               tdmdir='/tmp/mazetdm/', vaedir='/tmp/mazevae', qdir='/tmp/mazeq',
                cem_samples = 100, cem_iters = 3):
     self.parallel = parallel
     self.envtype = envtype
@@ -91,6 +92,23 @@ class SubGoalEnv(object):
         # Restore variables from disk.
         tdmsaver.restore(self.tdmsess, tdmdir + 'model-0')
         print('LOADED TDM!')
+
+    if qdir is not None:
+      self.q_graph = tf.Graph()
+      with self.q_graph.as_default():
+        self.qsess = tf.Session()
+        self.q = q_func.QFunc()
+        self.q_s = tf.placeholder(tf.float32, shape=[None, 64, 64, 3])
+        self.q_g = tf.placeholder(tf.float32, shape=[None, 64, 64, 3])
+        self.q_a = tf.placeholder(tf.float32, shape=[None, 2])
+
+        self.qval = self.q(self.q_s, self.q_g, self.q_a)
+
+        self.qsaver = tf.train.Saver()
+        qdir = qdir + '64_0.2/'
+        # Restore variables from disk.
+        self.qsaver.restore(self.qsess, qdir + 'model-66000')
+        print('LOADED Q')
 
     # LOADING SV2P (Modify this to your path and problem)
     homedir = '/iris/u/surajn/data'
@@ -188,13 +206,24 @@ class SubGoalEnv(object):
       g_e = self.tdmsess.run(self.tdout, forward_feed)
       return np.mean((g_e - ims_e)**2, 1)
 
-  def plan(self, im1, im2):
+  def plan(self, im1, im2, q=True):
     """Plans between two images."""
-    action, cost = self.cem(self.forward_sess, self.forward_placeholders,
+    if not q:
+      action, cost = self.cem(self.forward_sess, self.forward_placeholders,
                             self.forward_prediction_ops, im1, im2)
+    else:
+      a_dist = np.random.uniform(-3, 3, (1, 100, 2))
+      tgqs = []
+      for ind in range(100):
+#         print(im1.shape, im2.shape)
+        tgq = self.qsess.run(self.qval, {self.q_s: np.expand_dims(im1, 0) / 255., self.q_g: np.expand_dims(im2, 0) / 255., self.q_a: a_dist[:, ind]})
+        tgqs.append(tgq)
+      tgqs = np.concatenate(tgqs, -1).mean()
+      cost = -tgqs
+      action = None
     return action, cost
 
-  def step(self, action):
+  def step(self, action, q=True):
     """Step one 'Subgoal' action in the environment."""
     self.steps += 1
     # Convert subgoals to image
@@ -203,11 +232,11 @@ class SubGoalEnv(object):
     trajs = []
     for i in range(self.numsg+1):
       if i == 0:
-        acts, cost = self.plan(self.state, im[i])
+        acts, cost = self.plan(self.state, im[i], q)
       elif i == self.numsg:
-        acts, cost = self.plan(im[i-1], self.goalim)
+        acts, cost = self.plan(im[i-1], self.goalim, q)
       else:
-        acts, cost = self.plan(im[i-1], im[i])
+        acts, cost = self.plan(im[i-1], im[i], q)
       costs.append(cost)
       trajs.append(acts)
 

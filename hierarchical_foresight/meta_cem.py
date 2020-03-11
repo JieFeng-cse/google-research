@@ -32,7 +32,6 @@ from .utils import save_im
 from .models import q_func
 
 
-
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('difficulty', 'm',
@@ -63,6 +62,8 @@ flags.DEFINE_string('tdmdir', None,
                     'Path to the TDM model')
 flags.DEFINE_string('vaedir', '/tmp/mazevae/',
                     'Path to the VAE model')
+flags.DEFINE_string('qdir', None,
+                    'Path to the Q Func')
 flags.DEFINE_integer('metacem_samples', 100, 
                      'Number of samples in CEM over subgoals')
 flags.DEFINE_integer('cem_samples', 100, 
@@ -88,14 +89,18 @@ def meta_cem(env):
     acts1 = np.random.normal(mu1, sd1, (sample_size, (8*FLAGS.numsg)))
     losses = []
     for i in range(sample_size):
-      c, _ = env.step(acts1[i])
+      # t0 = time.time()
+      c, _ = env.step(acts1[i], FLAGS.qdir is not None)
       losses.append(-c)
+      # print("Trying SG Seq ", i, "Time: ", time.time() - t0)
     losses = np.array(losses)
 
     best_actions = np.array([x for _, x in sorted(
         zip(losses, acts1.tolist()), reverse=False)][:resample_size])
     best_actions1 = best_actions.reshape(resample_size, -1)
 
+    # Refit distribution to latents of best subgoals
+    # print("Refitting")
     mu1 = np.mean(best_actions1, axis=0)
     sd1 = np.std(best_actions1, axis=0)
 
@@ -118,6 +123,8 @@ def main(argv):
   savedir += '_GTGOAL' + str(FLAGS.gt_goals)
   savedir += '_H' + str(FLAGS.horizon)
   savedir += '_PH' + str(FLAGS.phorizon)
+  if FLAGS.qdir is not None:
+    savedir += '_Q'
   savedir += '/P' + str(FLAGS.parallel) + '/'
 
   if not os.path.exists(savedir):
@@ -146,6 +153,7 @@ def main(argv):
                                parallel=FLAGS.parallel,
                                tdmdir=FLAGS.tdmdir,
                                vaedir=FLAGS.vaedir,
+                               qdir = FLAGS.qdir,
                                cem_samples = FLAGS.cem_samples,
                                cem_iters = FLAGS.cem_iters)
 
@@ -232,7 +240,7 @@ def main(argv):
             goalnum += 1
             sgsteps = 0
 
-      acts, _ = env.plan(im, subgoals[goalnum])
+      acts, _ = env.plan(im, subgoals[goalnum], q=False)
       if FLAGS.envtype == 'real':
         break
       else:
